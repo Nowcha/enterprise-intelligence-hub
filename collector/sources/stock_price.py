@@ -15,6 +15,160 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2.0
 
 
+def get_company_info(ticker: str) -> dict[str, Any]:
+    """
+    Get company metadata from yfinance (no API key required).
+
+    Args:
+        ticker: Four-digit TSE ticker code.
+
+    Returns:
+        CompanyMeta-compatible dict. edinet_code will be empty string.
+
+    Raises:
+        ValueError: If the ticker is not found or returns no data.
+    """
+    import yfinance as yf
+
+    yf_ticker_str = f"{ticker}.T"
+    for attempt in range(MAX_RETRIES):
+        try:
+            stock = yf.Ticker(yf_ticker_str)
+            info: dict[str, Any] = stock.info or {}
+            name = info.get("longName") or info.get("shortName") or ""
+            if not name:
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY)
+                    continue
+                raise ValueError(f"No company info found for ticker {yf_ticker_str}")
+
+            employees = info.get("fullTimeEmployees")
+            return {
+                "edinet_code": "",
+                "ticker": ticker,
+                "company_name": name,
+                "company_name_en": info.get("longName"),
+                "sector_code_33": "",
+                "sector_name": info.get("sector") or info.get("industry") or "",
+                "listing_market": "プライム",
+                "founded_date": None,
+                "employee_count": int(employees) if employees else None,
+                "fiscal_year_end": "",
+                "website_url": info.get("website"),
+                "ir_url": None,
+                "description": info.get("longBusinessSummary"),
+            }
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.warning("get_company_info attempt %d failed for %s: %s", attempt + 1, yf_ticker_str, exc)
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+
+    raise ValueError(f"Could not retrieve company info for {yf_ticker_str}")
+
+
+def get_financial_data(ticker: str) -> list[dict[str, Any]]:
+    """
+    Get annual financial data from yfinance (no API key required).
+
+    Extracts income statement, balance sheet, and cash flow data.
+    Values are converted to million yen (百万円).
+
+    Args:
+        ticker: Four-digit TSE ticker code.
+
+    Returns:
+        List of FinancialPeriod-compatible dicts (annual, up to 4 periods).
+        data_source is set to "yfinance".
+    """
+    import math
+    import yfinance as yf
+
+    yf_ticker_str = f"{ticker}.T"
+    financials: list[dict[str, Any]] = []
+
+    try:
+        stock = yf.Ticker(yf_ticker_str)
+        income = stock.income_stmt
+        balance = stock.balance_sheet
+        cashflow = stock.cashflow
+
+        if income is None or income.empty:
+            logger.warning("No income statement data for %s", yf_ticker_str)
+            return financials
+
+        def _get(df: Any, col: Any, *keys: str) -> float | None:
+            """Extract a value from a DataFrame, trying multiple row keys."""
+            if df is None or df.empty:
+                return None
+            for key in keys:
+                try:
+                    if key in df.index:
+                        val = df.loc[key, col]
+                        if val is not None and not (isinstance(val, float) and math.isnan(val)):
+                            # Convert from yen to million yen
+                            return round(float(val) / 1_000_000, 2)
+                except Exception:
+                    continue
+            return None
+
+        for col in income.columns:
+            period_str = col.strftime("%Y-%m") if hasattr(col, "strftime") else str(col)[:7]
+
+            revenue = _get(income, col, "Total Revenue", "Revenue", "Operating Revenue")
+            op_income = _get(income, col, "Operating Income", "Operating Revenue", "EBIT")
+            net_income = _get(income, col, "Net Income", "Net Income Common Stockholders")
+            total_assets = _get(balance, col, "Total Assets")
+            equity = _get(balance, col, "Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest")
+            op_cf = _get(cashflow, col, "Operating Cash Flow", "Cash Flow From Continuing Operating Activities")
+            inv_cf = _get(cashflow, col, "Investing Cash Flow", "Cash Flow From Continuing Investing Activities")
+            fin_cf = _get(cashflow, col, "Financing Cash Flow", "Cash Flow From Continuing Financing Activities")
+
+            if revenue is None and net_income is None:
+                continue
+
+            equity_ratio = None
+            if equity is not None and total_assets and total_assets > 0:
+                equity_ratio = round(equity / total_assets * 100, 2)
+
+            roe = None
+            if net_income is not None and equity and equity > 0:
+                roe = round(net_income / equity * 100, 2)
+
+            roa = None
+            if net_income is not None and total_assets and total_assets > 0:
+                roa = round(net_income / total_assets * 100, 2)
+
+            financials.append({
+                "period": period_str,
+                "period_type": "annual",
+                "revenue": revenue or 0,
+                "operating_income": op_income or 0,
+                "ordinary_income": op_income or 0,
+                "net_income": net_income or 0,
+                "total_assets": total_assets or 0,
+                "net_assets": equity or 0,
+                "equity_ratio": equity_ratio or 0.0,
+                "roe": roe,
+                "roa": roa,
+                "operating_cf": op_cf,
+                "investing_cf": inv_cf,
+                "financing_cf": fin_cf,
+                "eps": None,
+                "dividend_per_share": None,
+                "segments": [],
+                "data_source": "yfinance",
+                "schema_version": "1.0.0",
+            })
+
+    except Exception as exc:
+        logger.error("Failed to get financial data from yfinance for %s: %s", yf_ticker_str, exc)
+
+    logger.info("Retrieved %d financial periods from yfinance for %s", len(financials), yf_ticker_str)
+    return financials
+
+
 def fetch_stock_data(ticker: str, period: str = "5y") -> dict[str, Any]:
     """
     Fetch historical daily OHLCV data for a TSE-listed stock via yfinance.

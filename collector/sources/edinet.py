@@ -1,5 +1,13 @@
-"""EDINET API v2 client for fetching disclosure documents."""
+"""EDINET API v2 client for fetching disclosure documents.
 
+NOTE: EDINET API v2 requires a subscription key (Ocp-Apim-Subscription-Key header).
+Set the EDINET_API_KEY environment variable to enable EDINET features.
+Without this key, all functions raise EdinetNotConfiguredError immediately.
+
+Key registration: https://api.edinet-fsa.go.jp/
+"""
+
+import os
 import time
 import logging
 from collections.abc import Generator
@@ -12,14 +20,37 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://disclosure.edinet-fsa.go.jp/api/v2"
 RETRY_COUNT = 3
-RETRY_BASE_DELAY = 1.0  # seconds
+RETRY_BASE_DELAY = 1.0
 REQUEST_TIMEOUT = 30
-RATE_LIMIT_DELAY = 1.0       # seconds between requests (document downloads)
-META_RATE_LIMIT_DELAY = 0.5  # seconds between metadata-only requests
+RATE_LIMIT_DELAY = 1.0
+META_RATE_LIMIT_DELAY = 0.5
 
-# Cache: edinet_code -> raw EDINET entry dict, populated by resolve_ticker.
-# Allows get_company_meta to skip re-scanning when the entry was already fetched.
 _edinet_entry_cache: dict[str, dict[str, Any]] = {}
+
+
+class EdinetNotConfiguredError(RuntimeError):
+    """Raised when EDINET_API_KEY is not set."""
+
+
+def _get_api_key() -> str | None:
+    """Return EDINET API key from environment, or None if not configured."""
+    return os.environ.get("EDINET_API_KEY") or None
+
+
+def is_edinet_configured() -> bool:
+    """Return True if EDINET_API_KEY is set in environment."""
+    return _get_api_key() is not None
+
+
+def _auth_headers() -> dict[str, str]:
+    """Return headers including the subscription key."""
+    key = _get_api_key()
+    if not key:
+        raise EdinetNotConfiguredError(
+            "EDINET_API_KEY environment variable is not set. "
+            "Register at https://api.edinet-fsa.go.jp/ to obtain a key."
+        )
+    return {"Ocp-Apim-Subscription-Key": key}
 
 
 def _request_with_retry(
@@ -27,26 +58,28 @@ def _request_with_retry(
     params: dict[str, Any] | None = None,
     rate_limit_delay: float = RATE_LIMIT_DELAY,
 ) -> requests.Response:
-    """Make HTTP GET request with retry and rate limiting."""
+    """Make HTTP GET request with retry, rate limiting, and auth header."""
+    headers = _auth_headers()  # raises EdinetNotConfiguredError if key missing
     last_exc: Exception | None = None
     for attempt in range(RETRY_COUNT):
         try:
-            response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            response = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             time.sleep(rate_limit_delay)
             return response
         except requests.HTTPError as exc:
             last_exc = exc
-            # 4xx errors (except 429) should not be retried
-            if exc.response is not None and exc.response.status_code < 500 and exc.response.status_code != 429:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status == 401:
+                raise EdinetNotConfiguredError(
+                    f"EDINET API returned 401. Check that EDINET_API_KEY is valid. URL={url}"
+                ) from exc
+            if status < 500 and status != 429:
                 raise
             delay = RETRY_BASE_DELAY * (2 ** attempt)
             logger.warning(
                 "Request failed (attempt %d/%d): %s. Retrying in %.1fs",
-                attempt + 1,
-                RETRY_COUNT,
-                exc,
-                delay,
+                attempt + 1, RETRY_COUNT, exc, delay,
             )
             time.sleep(delay)
         except requests.RequestException as exc:
@@ -54,10 +87,7 @@ def _request_with_retry(
             delay = RETRY_BASE_DELAY * (2 ** attempt)
             logger.warning(
                 "Request error (attempt %d/%d): %s. Retrying in %.1fs",
-                attempt + 1,
-                RETRY_COUNT,
-                exc,
-                delay,
+                attempt + 1, RETRY_COUNT, exc, delay,
             )
             time.sleep(delay)
 
@@ -85,7 +115,7 @@ def _build_meta_from_entry(edinet_code: str, entry: dict[str, Any]) -> dict[str,
         "company_name_en": None,
         "sector_code_33": "",
         "sector_name": entry.get("industryCode", ""),
-        "listing_market": "プライム",  # not directly available; defaulted
+        "listing_market": "プライム",
         "founded_date": None,
         "employee_count": None,
         "fiscal_year_end": "",
@@ -99,14 +129,8 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
     """
     Resolve company name or ticker to (edinet_code, ticker, company_name).
 
-    Search strategy for ticker codes:
-      - Scan daily for the last 400 days at 0.5 s/call (≈ 200 s ≈ 3.5 min).
-      - 400 days covers companies that only file annual reports (filed ~270 days
-        ago for March fiscal year), including companies that opted out of
-        quarterly reporting under Japan's 2024 law reform.
-
-    Search strategy for company name:
-      - Scan daily for the last 30 days.
+    Requires EDINET_API_KEY to be set. Raises EdinetNotConfiguredError if not.
+    Scans daily for 400 days to handle companies that only file annual reports.
 
     Args:
         query: Company name (Japanese) or 4-digit ticker code
@@ -115,12 +139,17 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
         Tuple of (edinet_code, ticker, company_name)
 
     Raises:
+        EdinetNotConfiguredError: If EDINET_API_KEY is not configured
         ValueError: If company not found
     """
+    if not is_edinet_configured():
+        raise EdinetNotConfiguredError(
+            "EDINET_API_KEY not set. Cannot resolve ticker via EDINET."
+        )
+
     today = date.today()
     is_ticker = query.isdigit() and len(query) == 4
     url = f"{BASE_URL}/documents.json"
-
     days_range = 400 if is_ticker else 30
 
     for days_back in range(days_range):
@@ -129,6 +158,8 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
         try:
             response = _request_with_retry(url, params=params, rate_limit_delay=META_RATE_LIMIT_DELAY)
             data = response.json()
+        except EdinetNotConfiguredError:
+            raise
         except Exception as exc:
             logger.debug("Could not fetch document list for %s: %s", check_date, exc)
             continue
@@ -139,15 +170,14 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
 
         if is_ticker:
             for entry in results:
-                # EDINET stores secCode as 5 digits with trailing "0" (e.g. "83540")
                 securities_code = str(entry.get("secCode", "")).strip().rstrip("0")
                 if securities_code == query:
                     edinet_code = entry.get("edinetCode", "")
                     company_name = entry.get("filerName", "")
-                    _edinet_entry_cache[edinet_code] = entry  # cache for get_company_meta
+                    _edinet_entry_cache[edinet_code] = entry
                     logger.info(
-                        "Resolved ticker=%s → edinet_code=%s name=%s (found at -%d days: %s)",
-                        query, edinet_code, company_name, days_back, check_date,
+                        "Resolved ticker=%s → edinet_code=%s name=%s (-%d days)",
+                        query, edinet_code, company_name, days_back,
                     )
                     return (edinet_code, query, company_name)
         else:
@@ -158,10 +188,11 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
                     edinet_code = entry.get("edinetCode", "")
                     raw_code = str(entry.get("secCode", "")).strip()
                     ticker = raw_code.rstrip("0") if raw_code else ""
+                    company_name = filer_name
                     _edinet_entry_cache[edinet_code] = entry
                     logger.info(
-                        "Resolved name=%s → ticker=%s edinet_code=%s (found at -%d days: %s)",
-                        query, ticker, edinet_code, days_back, check_date,
+                        "Resolved name=%s → ticker=%s edinet_code=%s (-%d days)",
+                        query, ticker, edinet_code, days_back,
                     )
                     return (edinet_code, ticker, company_name)
 
@@ -174,18 +205,7 @@ def search_documents(
     from_date: str,
     to_date: str,
 ) -> list[dict[str, Any]]:
-    """
-    Search EDINET documents.
-
-    Args:
-        edinet_code: EDINET提出者コード
-        doc_type: "120"=有価証券報告書, "140"=四半期報告書, "160"=決算短信
-        from_date: Start date "YYYY-MM-DD"
-        to_date: End date "YYYY-MM-DD"
-
-    Returns:
-        List of document metadata dicts
-    """
+    """Search EDINET documents. Requires EDINET_API_KEY."""
     matched: list[dict[str, Any]] = []
     url = f"{BASE_URL}/documents.json"
 
@@ -194,8 +214,10 @@ def search_documents(
         try:
             response = _request_with_retry(url, params=params, rate_limit_delay=META_RATE_LIMIT_DELAY)
             data = response.json()
+        except EdinetNotConfiguredError:
+            raise
         except Exception as exc:
-            logger.debug("search_documents: skip date %s due to error: %s", check_date, exc)
+            logger.debug("search_documents: skip date %s: %s", check_date, exc)
             continue
 
         results: list[dict[str, Any]] = data.get("results", []) or []
@@ -207,16 +229,7 @@ def search_documents(
 
 
 def download_document(doc_id: str, output_type: int = 1) -> bytes:
-    """
-    Download EDINET document.
-
-    Args:
-        doc_id: Document ID from search_documents
-        output_type: 1=XBRL ZIP, 2=PDF
-
-    Returns:
-        Document content as bytes
-    """
+    """Download EDINET document. Requires EDINET_API_KEY."""
     url = f"{BASE_URL}/documents/{doc_id}"
     params: dict[str, Any] = {"type": output_type}
     response = _request_with_retry(url, params=params, rate_limit_delay=RATE_LIMIT_DELAY)
@@ -224,24 +237,11 @@ def download_document(doc_id: str, output_type: int = 1) -> bytes:
 
 
 def get_company_meta(edinet_code: str) -> dict[str, Any]:
-    """
-    Get company metadata from EDINET.
-
-    Uses the module-level cache populated by resolve_ticker when available,
-    avoiding a second full date scan.
-
-    Args:
-        edinet_code: EDINET提出者コード
-
-    Returns:
-        CompanyMeta-compatible dict
-    """
-    # Fast path: entry already cached from resolve_ticker
+    """Get company metadata from EDINET. Requires EDINET_API_KEY."""
     if edinet_code in _edinet_entry_cache:
-        logger.info("get_company_meta: using cached entry for edinet_code=%s", edinet_code)
+        logger.info("get_company_meta: cache hit for edinet_code=%s", edinet_code)
         return _build_meta_from_entry(edinet_code, _edinet_entry_cache[edinet_code])
 
-    # Slow path: scan backwards (same 400-day window as resolve_ticker)
     today = date.today()
     url = f"{BASE_URL}/documents.json"
 
@@ -251,6 +251,8 @@ def get_company_meta(edinet_code: str) -> dict[str, Any]:
         try:
             response = _request_with_retry(url, params=params, rate_limit_delay=META_RATE_LIMIT_DELAY)
             data = response.json()
+        except EdinetNotConfiguredError:
+            raise
         except Exception as exc:
             logger.debug("get_company_meta: skip date %s: %s", check_date, exc)
             continue
