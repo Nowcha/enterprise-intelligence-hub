@@ -15,6 +15,11 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2.0
 RATE_LIMIT_DELAY = 30.0  # Long wait for Yahoo Finance 429 rate limit
 
+# Module-level cache: raw yfinance info dict keyed by 4-digit ticker.
+# Populated by get_company_info(); consumed by fetch_stock_data() to avoid
+# a redundant stock.info API call (reduces Yahoo Finance 429 rate limit exposure).
+_yf_info_cache: dict[str, dict[str, Any]] = {}
+
 
 def get_company_info(ticker: str) -> dict[str, Any]:
     """
@@ -42,6 +47,9 @@ def get_company_info(ticker: str) -> dict[str, Any]:
                     time.sleep(RETRY_DELAY)
                     continue
                 raise ValueError(f"No company info found for ticker {yf_ticker_str}")
+
+            # Cache raw info so fetch_stock_data can reuse it without a second API call.
+            _yf_info_cache[ticker] = info
 
             employees = info.get("fullTimeEmployees")
             return {
@@ -176,7 +184,11 @@ def get_financial_data(ticker: str) -> list[dict[str, Any]]:
     return financials
 
 
-def fetch_stock_data(ticker: str, period: str = "5y") -> dict[str, Any]:
+def fetch_stock_data(
+    ticker: str,
+    period: str = "5y",
+    cached_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Fetch historical daily OHLCV data for a TSE-listed stock via yfinance.
 
@@ -187,11 +199,14 @@ def fetch_stock_data(ticker: str, period: str = "5y") -> dict[str, Any]:
         ticker: Four-digit TSE ticker code.
         period: yfinance period string. Defaults to "5y" (five years).
                 Use "1mo" for update mode.
+        cached_info: Pre-fetched yfinance info dict (from get_company_info).
+                     If provided, avoids an extra stock.info API call, reducing
+                     Yahoo Finance 429 rate limit exposure.
 
     Returns:
         Dictionary with keys:
             "daily": list of DailyPrice dicts (date, open, high, low, close, volume),
-            "derived": dict of calculated metrics,
+            "derived": dict of calculated metrics (PER, PBR, MA-50/200, volatility),
             "schema_version": str.
 
     Raises:
@@ -200,6 +215,8 @@ def fetch_stock_data(ticker: str, period: str = "5y") -> dict[str, Any]:
     import yfinance as yf
 
     yf_ticker = f"{ticker}.T"
+    # Use caller-supplied info, or check module-level cache from get_company_info().
+    effective_info = cached_info if cached_info is not None else _yf_info_cache.get(ticker)
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -226,7 +243,8 @@ def fetch_stock_data(ticker: str, period: str = "5y") -> dict[str, Any]:
                     }
                 )
 
-            derived = _calculate_stock_metrics(daily_data, stock)
+            # Pass effective_info to avoid a redundant stock.info API call.
+            derived = _calculate_stock_metrics(daily_data, stock, cached_info=effective_info)
 
             return {
                 "daily": daily_data,
@@ -250,9 +268,19 @@ def fetch_stock_data(ticker: str, period: str = "5y") -> dict[str, Any]:
 
 
 def _calculate_stock_metrics(
-    daily_data: list[dict[str, Any]], stock: Any
+    daily_data: list[dict[str, Any]],
+    stock: Any,
+    cached_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Calculate derived stock metrics from price history and yfinance info."""
+    """
+    Calculate derived stock metrics from price history and yfinance info.
+
+    Args:
+        daily_data: List of daily OHLCV dicts.
+        stock: yfinance Ticker object (used only if cached_info is None).
+        cached_info: Pre-fetched info dict from get_company_info(). When provided,
+                     avoids calling stock.info again, reducing 429 rate limit exposure.
+    """
     derived: dict[str, Any] = {
         "per": None,
         "pbr": None,
@@ -284,7 +312,8 @@ def _calculate_stock_metrics(
             pass
 
     try:
-        info: dict[str, Any] = stock.info or {}
+        # Use cached_info if available; fall back to stock.info (costs an API call).
+        info: dict[str, Any] = cached_info if cached_info is not None else (stock.info or {})
         if info:
             per_val = info.get("trailingPE") or info.get("forwardPE")
             if per_val and not math.isnan(float(per_val)):

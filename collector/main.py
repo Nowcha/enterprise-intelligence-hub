@@ -22,7 +22,6 @@ from sources.edinet import is_edinet_configured, EdinetNotConfiguredError
 from sources.google_news import fetch_news
 from sources.stock_price import (
     fetch_stock_data,
-    calculate_derived_metrics,
     get_company_info,
     get_financial_data,
 )
@@ -171,17 +170,13 @@ def collect_company(
     try:
         logger.info("Collecting stock price for ticker=%s via yfinance", ticker)
         period = "5y" if mode == "full" else "1mo"
-        stock_raw = fetch_stock_data(ticker, period=period)
-        latest_fin: dict[str, Any] = {}
-        if collected.get("financials"):
-            latest_fin = next(iter(collected["financials"].values()), {})
-        stock_data = {
-            **stock_raw,
-            "derived": calculate_derived_metrics(stock_raw.get("daily", []), latest_fin),
-        }
+        # fetch_stock_data already computes derived metrics (PER, PBR, market_cap,
+        # dividend_yield, MA-50/200, volatility) via _calculate_stock_metrics.
+        # Do NOT overwrite "derived" — that would discard PER/PBR computed from stock.info.
+        stock_data = fetch_stock_data(ticker, period=period)
         fs_client.write_stock(ticker, stock_data)
         collected["stock"] = stock_data
-        logger.info("Wrote stock data: %d daily records", len(stock_raw.get("daily", [])))
+        logger.info("Wrote stock data: %d daily records", len(stock_data.get("daily", [])))
     except Exception as exc:
         logger.warning("Failed to collect stock data for ticker=%s: %s", ticker, exc)
 
