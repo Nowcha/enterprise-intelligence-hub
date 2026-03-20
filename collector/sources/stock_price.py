@@ -112,7 +112,17 @@ def get_financial_data(ticker: str) -> list[dict[str, Any]]:
         cashflow = stock.cashflow
 
         if income is None or income.empty:
-            logger.warning("No income statement data for %s", yf_ticker_str)
+            # yfinance sometimes silently returns empty DataFrame when rate-limited
+            # instead of raising an exception. Treat as retryable.
+            if attempt < MAX_RETRIES - 1:
+                logger.warning(
+                    "get_financial_data attempt %d: empty income_stmt for %s "
+                    "(possible silent rate limit). Retrying in %.0fs...",
+                    attempt + 1, yf_ticker_str, RATE_LIMIT_DELAY,
+                )
+                time.sleep(RATE_LIMIT_DELAY)
+                continue
+            logger.warning("No income statement data for %s after %d attempts", yf_ticker_str, MAX_RETRIES)
             return financials
 
         break  # success — exit retry loop
