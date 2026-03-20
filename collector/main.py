@@ -299,7 +299,7 @@ def main() -> None:
     company_name: str
 
     try:
-        ticker, edinet_code, company_name = resolve_ticker_yfinance(args.ticker)
+        edinet_code, ticker, company_name = resolve_ticker_yfinance(args.ticker)
     except Exception as yf_exc:
         logger.warning("yfinance resolution failed: %s. Trying EDINET...", yf_exc)
         if not is_edinet_configured():

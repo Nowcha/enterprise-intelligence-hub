@@ -1,20 +1,19 @@
 """
 Competitor estimation logic.
 Identifies peer companies using TSE sector classification and revenue proximity.
+
+Requires EDINET_API_KEY to be set. Without it, returns empty list immediately.
 """
 
 import logging
 import datetime
 from typing import Any
 
-import requests
-
 logger = logging.getLogger(__name__)
 
 REVENUE_RATIO_MIN = 0.3
 REVENUE_RATIO_MAX = 3.0
 MAX_COMPETITORS = 5
-EDINET_DOCS_URL = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
 
 
 def estimate_competitors(
@@ -27,6 +26,9 @@ def estimate_competitors(
     """
     Estimate the top competitor companies for a given target company.
 
+    Requires EDINET_API_KEY to be configured. Returns empty list immediately
+    if the key is not set or if sector_code is empty (yfinance-only mode).
+
     Algorithm:
         1. Retrieve all TSE-listed companies in the same 33-sector category.
         2. Filter to companies whose revenue is between
@@ -36,6 +38,7 @@ def estimate_competitors(
     Args:
         ticker: Four-digit TSE ticker code of the target company.
         sector_code: TSE 33-sector code string (e.g. "3650" for Electric Appliances).
+                     Empty string when resolved via yfinance (no sector code available).
         revenue: Target company annual revenue in millions of JPY.
                  Pass 0.0 if unknown; all same-sector companies will be returned.
         sector_map: Parsed config/sector_map.json as a dict.
@@ -44,16 +47,36 @@ def estimate_competitors(
     Returns:
         List of up to MAX_COMPETITORS CompetitorEntry dicts:
             ticker, company_name, reason.
+        Returns empty list if EDINET_API_KEY is not set or sector_code is empty.
     """
+    from sources.edinet import is_edinet_configured
+
+    if not is_edinet_configured():
+        logger.info(
+            "Skipping competitor estimation for ticker=%s: EDINET_API_KEY not set. "
+            "Set EDINET_API_KEY GitHub Secret to enable competitor estimation.",
+            ticker,
+        )
+        return []
+
+    if not sector_code:
+        logger.info(
+            "Skipping competitor estimation for ticker=%s: sector_code is empty "
+            "(resolved via yfinance — no TSE 33-sector code available).",
+            ticker,
+        )
+        return []
+
     logger.info(
-        f"Estimating competitors for {ticker} (sector: {sector_code}, revenue: {revenue}M)"
+        "Estimating competitors for %s (sector: %s, revenue: %sM)",
+        ticker, sector_code, revenue,
     )
 
     try:
         sector_companies = get_sector_companies(sector_code)
 
         if not sector_companies:
-            logger.warning(f"No companies found for sector {sector_code}")
+            logger.warning("No companies found for sector %s", sector_code)
             return []
 
         sector_name: str = ""
@@ -106,7 +129,7 @@ def estimate_competitors(
         ]
 
     except Exception as e:
-        logger.error(f"Failed to estimate competitors: {e}")
+        logger.error("Failed to estimate competitors: %s", e)
         return []
 
 
@@ -114,19 +137,26 @@ def get_sector_companies(sector_code: str) -> list[dict[str, Any]]:
     """
     Retrieve all TSE-listed companies belonging to a given 33-sector code.
 
-    Data source: EDINET company list (cached locally or fetched on demand).
+    Data source: EDINET company list. Requires EDINET_API_KEY.
 
     Args:
         sector_code: TSE 33-sector code string (e.g. "3650").
 
     Returns:
         List of dicts with keys: ticker, edinet_code, company_name, sector_code_33.
+        Returns empty list if EDINET_API_KEY is not set.
     """
-    logger.info(f"Getting sector companies for code: {sector_code}")
+    from sources.edinet import is_edinet_configured, _request_with_retry, BASE_URL
+
+    if not is_edinet_configured():
+        return []
+
+    logger.info("Getting sector companies for code: %s", sector_code)
 
     companies: list[dict[str, Any]] = []
     seen_tickers: set[str] = set()
     end_date = datetime.date.today()
+    url = f"{BASE_URL}/documents.json"
 
     # Scan last 90 days of EDINET filings to collect unique companies in the sector.
     for i in range(90):
@@ -134,14 +164,7 @@ def get_sector_companies(sector_code: str) -> list[dict[str, Any]]:
         date_str = check_date.strftime("%Y-%m-%d")
 
         try:
-            resp = requests.get(
-                EDINET_DOCS_URL,
-                params={"date": date_str, "type": 2},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                continue
-
+            resp = _request_with_retry(url, params={"date": date_str, "type": 2})
             data: dict[str, Any] = resp.json()
             results: list[dict[str, Any]] = data.get("results") or []
 
@@ -151,7 +174,6 @@ def get_sector_companies(sector_code: str) -> list[dict[str, Any]]:
                 if not doc_ticker or doc_ticker in seen_tickers:
                     continue
 
-                # industryCode may directly match the 33-sector code.
                 if doc.get("industryCode") == sector_code:
                     seen_tickers.add(doc_ticker)
                     companies.append(
@@ -167,7 +189,7 @@ def get_sector_companies(sector_code: str) -> list[dict[str, Any]]:
                 break
 
         except Exception as e:
-            logger.debug(f"Error fetching documents for {date_str}: {e}")
+            logger.debug("Error fetching documents for %s: %s", date_str, e)
             continue
 
     return companies
@@ -190,7 +212,7 @@ def get_simple_revenue(edinet_code: str) -> float | None:
         return None
 
     try:
-        from collector.sources import edinet, xbrl_parser
+        from sources import edinet, xbrl_parser
 
         to_date = datetime.date.today().strftime("%Y-%m-%d")
         from_date = (datetime.date.today() - datetime.timedelta(days=400)).strftime(
@@ -212,5 +234,5 @@ def get_simple_revenue(edinet_code: str) -> float | None:
         return float(revenue_val) or None
 
     except Exception as e:
-        logger.debug(f"Failed to get revenue for {edinet_code}: {e}")
+        logger.debug("Failed to get revenue for %s: %s", edinet_code, e)
         return None
