@@ -1,8 +1,14 @@
 """
-Stock price fetcher using yfinance.
+Stock price fetcher using yfinance with curl_cffi browser impersonation.
+
+Primary:  yfinance + curl_cffi (bypasses Yahoo Finance CDN TLS fingerprinting)
+Fallback: Stooq CSV API (free, no rate limiting on GitHub Actions)
+
 Retrieves historical OHLCV data and calculates technical/fundamental metrics.
 """
 
+import csv
+import io
 import logging
 import math
 import statistics
@@ -21,6 +27,26 @@ RATE_LIMIT_DELAY = 30.0  # Long wait for Yahoo Finance 429 rate limit
 _yf_info_cache: dict[str, dict[str, Any]] = {}
 
 
+def _make_session() -> Any:
+    """
+    Create a curl_cffi session that impersonates a Chrome browser.
+
+    Yahoo Finance's Azure CDN blocks GitHub Actions IPs via TLS fingerprinting.
+    curl_cffi mimics browser TLS handshakes to bypass this detection.
+
+    Falls back to a plain requests.Session if curl_cffi is not installed.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+        session = cffi_requests.Session(impersonate="chrome")
+        logger.debug("Using curl_cffi Chrome session for yfinance")
+        return session
+    except ImportError:
+        import requests
+        logger.debug("curl_cffi not available; using plain requests.Session")
+        return requests.Session()
+
+
 def get_company_info(ticker: str) -> dict[str, Any]:
     """
     Get company metadata from yfinance (no API key required).
@@ -37,9 +63,10 @@ def get_company_info(ticker: str) -> dict[str, Any]:
     import yfinance as yf
 
     yf_ticker_str = f"{ticker}.T"
+    session = _make_session()
     for attempt in range(MAX_RETRIES):
         try:
-            stock = yf.Ticker(yf_ticker_str)
+            stock = yf.Ticker(yf_ticker_str, session=session)
             info: dict[str, Any] = stock.info or {}
             name = info.get("longName") or info.get("shortName") or ""
             if not name:
@@ -102,11 +129,12 @@ def get_financial_data(ticker: str) -> list[dict[str, Any]]:
 
     yf_ticker_str = f"{ticker}.T"
     financials: list[dict[str, Any]] = []
+    session = _make_session()
 
     # Retry loop for 429 rate limits on the timeseries endpoint
     for attempt in range(MAX_RETRIES):
       try:
-        stock = yf.Ticker(yf_ticker_str)
+        stock = yf.Ticker(yf_ticker_str, session=session)
         income = stock.income_stmt
         balance = stock.balance_sheet
         cashflow = stock.cashflow
@@ -247,18 +275,21 @@ def fetch_stock_data(
     yf_ticker = f"{ticker}.T"
     # Use caller-supplied info, or check module-level cache from get_company_info().
     effective_info = cached_info if cached_info is not None else _yf_info_cache.get(ticker)
+    session = _make_session()
 
     for attempt in range(MAX_RETRIES):
         try:
-            stock = yf.Ticker(yf_ticker)
+            stock = yf.Ticker(yf_ticker, session=session)
             hist = stock.history(period=period)
 
             if hist.empty:
-                logger.warning(f"No history data for {yf_ticker}")
+                logger.warning(f"No history data for {yf_ticker} via yfinance (attempt {attempt + 1})")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY * (attempt + 1))
                     continue
-                raise ValueError(f"No data returned for ticker {yf_ticker}")
+                # All yfinance attempts failed — try Stooq as fallback
+                logger.info("Falling back to Stooq for stock price data: %s", ticker)
+                return _fetch_from_stooq(ticker, period, effective_info)
 
             daily_data: list[dict[str, Any]] = []
             for date, row in hist.iterrows():
@@ -294,7 +325,102 @@ def fetch_stock_data(
             if attempt < MAX_RETRIES - 1:
                 time.sleep(delay)
 
-    return {}
+    # All yfinance attempts failed — try Stooq as fallback
+    logger.info("All yfinance attempts failed; falling back to Stooq for %s", ticker)
+    return _fetch_from_stooq(ticker, period, effective_info)
+
+
+def _fetch_from_stooq(
+    ticker: str,
+    period: str,
+    cached_info: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Fetch stock price history from Stooq.com as a fallback when Yahoo Finance is blocked.
+
+    Stooq provides free end-of-day CSV data for TSE-listed stocks using the symbol
+    format "{ticker}.jp" (e.g. "8354.jp").
+
+    Args:
+        ticker: Four-digit TSE ticker code.
+        period: yfinance-style period string ("5y", "1mo", etc.).
+        cached_info: Pre-fetched yfinance info dict for derived metrics (may be None).
+
+    Returns:
+        Same dict structure as fetch_stock_data(): {"daily": [...], "derived": {...}, ...}
+        Returns empty dict if Stooq also fails.
+    """
+    import datetime
+    import requests as std_requests
+
+    # Map yfinance period string to a lookback in days
+    period_days: dict[str, int] = {
+        "1mo": 35,
+        "3mo": 95,
+        "6mo": 185,
+        "1y": 370,
+        "2y": 740,
+        "5y": 1830,
+        "10y": 3660,
+    }
+    days = period_days.get(period, 1830)
+    end_date = datetime.date.today()
+    start_date = end_date - datetime.timedelta(days=days)
+
+    stooq_symbol = f"{ticker}.jp"
+    url = (
+        f"https://stooq.com/q/d/l/"
+        f"?s={stooq_symbol}"
+        f"&d1={start_date.strftime('%Y%m%d')}"
+        f"&d2={end_date.strftime('%Y%m%d')}"
+        f"&i=d"
+    )
+
+    try:
+        resp = std_requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        content = resp.text.strip()
+
+        if not content or "No data" in content or content.startswith("<!"):
+            logger.warning("Stooq returned no data for %s", stooq_symbol)
+            return {}
+
+        reader = csv.DictReader(io.StringIO(content))
+        daily_data: list[dict[str, Any]] = []
+        for row in reader:
+            try:
+                daily_data.append({
+                    "date": row["Date"],
+                    "open": round(float(row["Open"]), 2),
+                    "high": round(float(row["High"]), 2),
+                    "low": round(float(row["Low"]), 2),
+                    "close": round(float(row["Close"]), 2),
+                    "volume": int(float(row.get("Volume") or 0)),
+                })
+            except (KeyError, ValueError):
+                continue
+
+        if not daily_data:
+            logger.warning("Stooq returned empty parsed data for %s", stooq_symbol)
+            return {}
+
+        # Sort ascending (Stooq returns newest-first)
+        daily_data.sort(key=lambda d: d["date"])
+
+        logger.info("Stooq: fetched %d daily records for %s", len(daily_data), stooq_symbol)
+
+        # Compute derived metrics without a yfinance Ticker (no stock.info call)
+        derived = _calculate_stock_metrics(daily_data, stock=None, cached_info=cached_info)
+
+        return {
+            "daily": daily_data,
+            "derived": derived,
+            "schema_version": "1.0.0",
+        }
+
+    except Exception as exc:
+        logger.error("Stooq fallback failed for %s: %s", stooq_symbol, exc)
+        return {}
 
 
 def _calculate_stock_metrics(
@@ -343,7 +469,11 @@ def _calculate_stock_metrics(
 
     try:
         # Use cached_info if available; fall back to stock.info (costs an API call).
-        info: dict[str, Any] = cached_info if cached_info is not None else (stock.info or {})
+        # stock may be None when called from _fetch_from_stooq — guard against that.
+        info: dict[str, Any] = (
+            cached_info if cached_info is not None
+            else (stock.info if stock is not None else {}) or {}
+        )
         if info:
             per_val = info.get("trailingPE") or info.get("forwardPE")
             if per_val and not math.isnan(float(per_val)):
