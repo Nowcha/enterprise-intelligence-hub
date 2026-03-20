@@ -103,7 +103,9 @@ def get_financial_data(ticker: str) -> list[dict[str, Any]]:
     yf_ticker_str = f"{ticker}.T"
     financials: list[dict[str, Any]] = []
 
-    try:
+    # Retry loop for 429 rate limits on the timeseries endpoint
+    for attempt in range(MAX_RETRIES):
+      try:
         stock = yf.Ticker(yf_ticker_str)
         income = stock.income_stmt
         balance = stock.balance_sheet
@@ -112,6 +114,24 @@ def get_financial_data(ticker: str) -> list[dict[str, Any]]:
         if income is None or income.empty:
             logger.warning("No income statement data for %s", yf_ticker_str)
             return financials
+
+        break  # success — exit retry loop
+
+      except Exception as exc:
+        exc_str = str(exc)
+        is_rate_limit = "429" in exc_str or "Too Many Requests" in exc_str
+        delay = RATE_LIMIT_DELAY if is_rate_limit else RETRY_DELAY
+        logger.warning(
+            "get_financial_data attempt %d failed for %s: %s (retry in %.0fs)",
+            attempt + 1, yf_ticker_str, exc, delay,
+        )
+        if attempt < MAX_RETRIES - 1:
+            time.sleep(delay)
+        else:
+            logger.error("Failed to get financial data from yfinance for %s after %d attempts", yf_ticker_str, MAX_RETRIES)
+            return financials
+
+    try:
 
         def _get(df: Any, col: Any, *keys: str) -> float | None:
             """Extract a value from a DataFrame, trying multiple row keys."""

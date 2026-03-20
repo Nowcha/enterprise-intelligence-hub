@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { collection, onSnapshot, query, orderBy, where } from 'firebase/firestore'
+import { collection, onSnapshot, query, orderBy } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import type { FinancialPeriod } from '@/types'
 
@@ -30,20 +30,19 @@ export const useFinancials = (
     setLoading(true)
     setError(null)
 
+    // Use a simple single-field orderBy (auto-indexed by Firestore).
+    // Composite indexes (where + orderBy) require manual deployment and build time.
+    // Client-side filtering by periodType avoids that dependency entirely.
     const colRef = collection(db, 'companies', ticker, 'financials')
-
-    const q = options.periodType
-      ? query(
-          colRef,
-          where('period_type', '==', options.periodType),
-          orderBy('period', 'desc')
-        )
-      : query(colRef, orderBy('period', 'desc'))
+    const q = query(colRef, orderBy('period', 'desc'))
 
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        const financials = snapshot.docs.map((doc) => doc.data() as FinancialPeriod)
+        let financials = snapshot.docs.map((doc) => doc.data() as FinancialPeriod)
+        if (options.periodType) {
+          financials = financials.filter((f) => f.period_type === options.periodType)
+        }
         setData(financials)
         setLoading(false)
       },
