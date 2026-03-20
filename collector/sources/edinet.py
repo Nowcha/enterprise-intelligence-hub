@@ -84,10 +84,12 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
     is_ticker = query.isdigit() and len(query) == 4
     url = f"{BASE_URL}/documents.json"
 
-    # For ticker-based search: scan weekly steps over 400 days (covers >1 year of filings).
-    # For name-based search: scan daily over 30 days (recently active companies).
+    # Ticker-based: scan daily for the last 120 days.
+    # Japanese companies file quarterly reports within 45 days of period end,
+    # so 120 days of daily scanning reliably catches at least one filing per company.
+    # Name-based: scan daily over 30 days (recently active companies).
     if is_ticker:
-        days_back_list = list(range(0, 400, 7))  # ~57 requests
+        days_back_list = list(range(120))  # 120 daily steps ≈ 3 min at 1.5s/call
     else:
         days_back_list = list(range(30))
 
@@ -206,7 +208,7 @@ def get_company_meta(edinet_code: str) -> dict[str, Any]:
     today = date.today()
     url = f"{BASE_URL}/documents.json"
 
-    for days_back in range(60):
+    for days_back in range(120):
         check_date = (today - timedelta(days=days_back)).isoformat()
         params: dict[str, Any] = {"date": check_date, "type": 2}
         try:
