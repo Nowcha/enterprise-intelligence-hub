@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+RATE_LIMIT_DELAY = 30.0  # Long wait for Yahoo Finance 429 rate limit
 
 
 def get_company_info(ticker: str) -> dict[str, Any]:
@@ -61,9 +62,15 @@ def get_company_info(ticker: str) -> dict[str, Any]:
         except ValueError:
             raise
         except Exception as exc:
-            logger.warning("get_company_info attempt %d failed for %s: %s", attempt + 1, yf_ticker_str, exc)
+            exc_str = str(exc)
+            is_rate_limit = "429" in exc_str or "Too Many Requests" in exc_str
+            delay = RATE_LIMIT_DELAY if is_rate_limit else RETRY_DELAY
+            logger.warning(
+                "get_company_info attempt %d failed for %s: %s (retry in %.0fs)",
+                attempt + 1, yf_ticker_str, exc, delay,
+            )
             if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
+                time.sleep(delay)
 
     raise ValueError(f"Could not retrieve company info for {yf_ticker_str}")
 
@@ -230,11 +237,14 @@ def fetch_stock_data(ticker: str, period: str = "5y") -> dict[str, Any]:
         except ValueError:
             raise
         except Exception as e:
+            exc_str = str(e)
+            is_rate_limit = "429" in exc_str or "Too Many Requests" in exc_str
+            delay = RATE_LIMIT_DELAY if is_rate_limit else RETRY_DELAY * (attempt + 1)
             logger.error(
                 f"Failed to fetch stock data for {yf_ticker} (attempt {attempt + 1}): {e}"
             )
             if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY * (attempt + 1))
+                time.sleep(delay)
 
     return {}
 

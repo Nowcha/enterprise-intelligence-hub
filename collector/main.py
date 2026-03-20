@@ -66,17 +66,20 @@ def resolve_ticker_yfinance(ticker_query: str) -> tuple[str, str, str]:
     """
     Resolve a ticker code to (edinet_code, ticker, company_name) using yfinance.
 
-    If query is a 4-digit ticker code, look it up via yfinance directly.
-    edinet_code will be empty string (not available from yfinance).
+    For 4-digit ticker codes the ticker itself is the resolution — no API call
+    is needed to confirm it. Company name is fetched opportunistically from
+    yfinance but failure (e.g. 429 rate limit) does not block the pipeline;
+    collect_company() will attempt again independently.
 
     Args:
         ticker_query: Four-digit TSE ticker code.
 
     Returns:
         Tuple of (edinet_code, ticker, company_name).
+        company_name may be empty string if yfinance is rate-limited.
 
     Raises:
-        ValueError: If company cannot be found.
+        ValueError: If ticker_query is not a 4-digit numeric string.
     """
     if not (ticker_query.isdigit() and len(ticker_query) == 4):
         raise ValueError(
@@ -84,14 +87,21 @@ def resolve_ticker_yfinance(ticker_query: str) -> tuple[str, str, str]:
             f"Please provide a 4-digit ticker code instead of: {ticker_query!r}"
         )
 
-    info = get_company_info(ticker_query)
-    company_name = info.get("company_name", "")
-    if not company_name:
-        raise ValueError(f"Could not resolve ticker via yfinance: {ticker_query!r}")
+    # Attempt to fetch company name; rate-limit errors are non-fatal here.
+    company_name = ""
+    try:
+        info = get_company_info(ticker_query)
+        company_name = info.get("company_name", "")
+    except Exception as exc:
+        logger.warning(
+            "Could not fetch company name for ticker=%s via yfinance (%s). "
+            "Will retry during metadata collection.",
+            ticker_query, exc,
+        )
 
     logger.info(
-        "Resolved ticker=%s → company_name=%s (via yfinance, edinet_code=N/A)",
-        ticker_query, company_name,
+        "Resolved ticker=%s → company_name=%r (via yfinance, edinet_code=N/A)",
+        ticker_query, company_name or "(unknown — will retry)",
     )
     return ("", ticker_query, company_name)
 
@@ -177,8 +187,10 @@ def collect_company(
 
     # --- News (Google News RSS) ---
     try:
-        logger.info("Collecting news for ticker=%s company=%s", ticker, company_name)
-        articles = fetch_news(company_name, max_articles=30)
+        # Use company_name for search; fall back to ticker code if name is unknown.
+        news_query = company_name or ticker
+        logger.info("Collecting news for ticker=%s query=%r", ticker, news_query)
+        articles = fetch_news(news_query, max_articles=30)
         if articles:
             fs_client.write_news_batch(ticker, articles)
         collected["news"] = articles
