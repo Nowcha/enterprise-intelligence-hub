@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(update-config)",
+      "Bash(echo \"EXIT_CODE: $?\")",
+      "Bash(python -c \":*)",
+      "Bash(echo \"TSC EXIT: $?\")",
+      "Bash(echo \"BUILD EXIT: $?\")",
+      "Bash(echo \"TSC_EXIT: $?\")",
+      "Bash(echo \"BUILD_EXIT: $?\")",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(echo \"EXIT_CODE=$?\")"
+    ]
+  }
+}

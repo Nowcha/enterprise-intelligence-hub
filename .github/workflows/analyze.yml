@@ -1,0 +1,54 @@
+name: Analyze Company Data
+
+on:
+  workflow_run:
+    workflows: ["Collect Company Data"]
+    types:
+      - completed
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r collector/requirements.txt
+
+      - name: Set up Node.js (for Claude CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Get ticker from previous workflow
+        id: get-ticker
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TICKER=$(gh run view ${{ github.event.workflow_run.id }} --json inputs --jq '.inputs.ticker' 2>/dev/null || echo "")
+          echo "ticker=$TICKER" >> $GITHUB_OUTPUT
+
+      - name: Run analysis
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          TICKER="${{ steps.get-ticker.outputs.ticker }}"
+          if [ -z "$TICKER" ]; then
+            echo "No ticker found, skipping analysis"
+            exit 0
+          fi
+          bash analyzer/run_analysis.sh "$TICKER"

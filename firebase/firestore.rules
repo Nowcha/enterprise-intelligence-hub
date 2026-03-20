@@ -1,0 +1,39 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /companies/{ticker} {
+      allow read: if true;
+      allow write: if false;
+
+      match /financials/{period} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      match /governance/{document} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      match /competitors/{document} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      match /news/{articleHash} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      match /stock/{document} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      match /analysis/{analysisType} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+  }
+}
