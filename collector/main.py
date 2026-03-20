@@ -129,7 +129,7 @@ def collect_competitor_data(
     for comp_ticker in competitor_tickers:
         try:
             logger.info("Collecting competitor data for ticker=%s", comp_ticker)
-            resolved_ticker, edinet_code, comp_name = resolve_ticker(comp_ticker)
+            edinet_code, resolved_ticker, comp_name = resolve_ticker(comp_ticker)
             collect_company(resolved_ticker, edinet_code, comp_name, mode, fs_client)
         except Exception as exc:
             logger.warning(

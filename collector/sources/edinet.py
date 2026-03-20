@@ -81,11 +81,18 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
     # Fetch a recent document list to get the submitter list
     # Use today's date and walk backwards up to 30 days to find a day with results
     today = date.today()
-    found_entry: dict[str, Any] | None = None
+    is_ticker = query.isdigit() and len(query) == 4
+    url = f"{BASE_URL}/documents.json"
 
-    for days_back in range(30):
+    # For ticker-based search: scan weekly steps over 400 days (covers >1 year of filings).
+    # For name-based search: scan daily over 30 days (recently active companies).
+    if is_ticker:
+        days_back_list = list(range(0, 400, 7))  # ~57 requests
+    else:
+        days_back_list = list(range(30))
+
+    for days_back in days_back_list:
         check_date = (today - timedelta(days=days_back)).isoformat()
-        url = f"{BASE_URL}/documents.json"
         params: dict[str, Any] = {"date": check_date, "type": 2}
         try:
             response = _request_with_retry(url, params=params)
@@ -98,14 +105,17 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
         if not results:
             continue
 
-        # If query looks like a 4-digit ticker code
-        if query.isdigit() and len(query) == 4:
+        if is_ticker:
             for entry in results:
+                # EDINET stores secCode as 5 digits with trailing "0" (e.g. "83540")
                 securities_code = str(entry.get("secCode", "")).strip().rstrip("0")
                 if securities_code == query:
                     edinet_code = entry.get("edinetCode", "")
                     company_name = entry.get("filerName", "")
-                    found_entry = entry
+                    logger.info(
+                        "Resolved ticker=%s to edinet_code=%s name=%s (via %s)",
+                        query, edinet_code, company_name, check_date,
+                    )
                     return (edinet_code, query, company_name)
         else:
             # Name-based search: look for partial match in filerName
@@ -118,10 +128,12 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
                     raw_code = str(entry.get("secCode", "")).strip()
                     ticker = raw_code.rstrip("0") if raw_code else ""
                     company_name = filer_name
-                    found_entry = entry
+                    logger.info(
+                        "Resolved name=%s to ticker=%s edinet_code=%s (via %s)",
+                        query, ticker, edinet_code, check_date,
+                    )
                     return (edinet_code, ticker, company_name)
 
-    _ = found_entry  # suppress unused warning
     raise ValueError(f"Company not found for query: {query!r}")
 
 
