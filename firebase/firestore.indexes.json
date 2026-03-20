@@ -12,13 +12,6 @@
       "collectionGroup": "news",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "published_at", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "news",
-      "queryScope": "COLLECTION",
-      "fields": [
         { "fieldPath": "source", "order": "ASCENDING" },
         { "fieldPath": "published_at", "order": "DESCENDING" }
       ]
