@@ -14,17 +14,26 @@ BASE_URL = "https://disclosure.edinet-fsa.go.jp/api/v2"
 RETRY_COUNT = 3
 RETRY_BASE_DELAY = 1.0  # seconds
 REQUEST_TIMEOUT = 30
-RATE_LIMIT_DELAY = 1.0  # seconds between requests
+RATE_LIMIT_DELAY = 1.0       # seconds between requests (document downloads)
+META_RATE_LIMIT_DELAY = 0.5  # seconds between metadata-only requests
+
+# Cache: edinet_code -> raw EDINET entry dict, populated by resolve_ticker.
+# Allows get_company_meta to skip re-scanning when the entry was already fetched.
+_edinet_entry_cache: dict[str, dict[str, Any]] = {}
 
 
-def _request_with_retry(url: str, params: dict[str, Any] | None = None) -> requests.Response:
+def _request_with_retry(
+    url: str,
+    params: dict[str, Any] | None = None,
+    rate_limit_delay: float = RATE_LIMIT_DELAY,
+) -> requests.Response:
     """Make HTTP GET request with retry and rate limiting."""
     last_exc: Exception | None = None
     for attempt in range(RETRY_COUNT):
         try:
             response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            time.sleep(RATE_LIMIT_DELAY)
+            time.sleep(rate_limit_delay)
             return response
         except requests.HTTPError as exc:
             last_exc = exc
@@ -65,9 +74,39 @@ def _iter_date_range(from_date: str, to_date: str) -> Generator[str, None, None]
         current += timedelta(days=1)
 
 
+def _build_meta_from_entry(edinet_code: str, entry: dict[str, Any]) -> dict[str, Any]:
+    """Build a CompanyMeta-compatible dict from a raw EDINET document list entry."""
+    raw_code = str(entry.get("secCode", "")).strip()
+    ticker = raw_code.rstrip("0") if raw_code else ""
+    return {
+        "edinet_code": edinet_code,
+        "ticker": ticker,
+        "company_name": entry.get("filerName", ""),
+        "company_name_en": None,
+        "sector_code_33": "",
+        "sector_name": entry.get("industryCode", ""),
+        "listing_market": "プライム",  # not directly available; defaulted
+        "founded_date": None,
+        "employee_count": None,
+        "fiscal_year_end": "",
+        "website_url": None,
+        "ir_url": None,
+        "description": None,
+    }
+
+
 def resolve_ticker(query: str) -> tuple[str, str, str]:
     """
     Resolve company name or ticker to (edinet_code, ticker, company_name).
+
+    Search strategy for ticker codes:
+      - Scan daily for the last 400 days at 0.5 s/call (≈ 200 s ≈ 3.5 min).
+      - 400 days covers companies that only file annual reports (filed ~270 days
+        ago for March fiscal year), including companies that opted out of
+        quarterly reporting under Japan's 2024 law reform.
+
+    Search strategy for company name:
+      - Scan daily for the last 30 days.
 
     Args:
         query: Company name (Japanese) or 4-digit ticker code
@@ -78,26 +117,17 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
     Raises:
         ValueError: If company not found
     """
-    # Fetch a recent document list to get the submitter list
-    # Use today's date and walk backwards up to 30 days to find a day with results
     today = date.today()
     is_ticker = query.isdigit() and len(query) == 4
     url = f"{BASE_URL}/documents.json"
 
-    # Ticker-based: scan daily for the last 120 days.
-    # Japanese companies file quarterly reports within 45 days of period end,
-    # so 120 days of daily scanning reliably catches at least one filing per company.
-    # Name-based: scan daily over 30 days (recently active companies).
-    if is_ticker:
-        days_back_list = list(range(120))  # 120 daily steps ≈ 3 min at 1.5s/call
-    else:
-        days_back_list = list(range(30))
+    days_range = 400 if is_ticker else 30
 
-    for days_back in days_back_list:
+    for days_back in range(days_range):
         check_date = (today - timedelta(days=days_back)).isoformat()
         params: dict[str, Any] = {"date": check_date, "type": 2}
         try:
-            response = _request_with_retry(url, params=params)
+            response = _request_with_retry(url, params=params, rate_limit_delay=META_RATE_LIMIT_DELAY)
             data = response.json()
         except Exception as exc:
             logger.debug("Could not fetch document list for %s: %s", check_date, exc)
@@ -114,25 +144,24 @@ def resolve_ticker(query: str) -> tuple[str, str, str]:
                 if securities_code == query:
                     edinet_code = entry.get("edinetCode", "")
                     company_name = entry.get("filerName", "")
+                    _edinet_entry_cache[edinet_code] = entry  # cache for get_company_meta
                     logger.info(
-                        "Resolved ticker=%s to edinet_code=%s name=%s (via %s)",
-                        query, edinet_code, company_name, check_date,
+                        "Resolved ticker=%s → edinet_code=%s name=%s (found at -%d days: %s)",
+                        query, edinet_code, company_name, days_back, check_date,
                     )
                     return (edinet_code, query, company_name)
         else:
-            # Name-based search: look for partial match in filerName
             query_lower = query.lower()
             for entry in results:
                 filer_name: str = entry.get("filerName", "") or ""
                 if query_lower in filer_name.lower() or query in filer_name:
                     edinet_code = entry.get("edinetCode", "")
-                    # secCode may have trailing zero (e.g. "72030")
                     raw_code = str(entry.get("secCode", "")).strip()
                     ticker = raw_code.rstrip("0") if raw_code else ""
-                    company_name = filer_name
+                    _edinet_entry_cache[edinet_code] = entry
                     logger.info(
-                        "Resolved name=%s to ticker=%s edinet_code=%s (via %s)",
-                        query, ticker, edinet_code, check_date,
+                        "Resolved name=%s → ticker=%s edinet_code=%s (found at -%d days: %s)",
+                        query, ticker, edinet_code, days_back, check_date,
                     )
                     return (edinet_code, ticker, company_name)
 
@@ -163,7 +192,7 @@ def search_documents(
     for check_date in _iter_date_range(from_date, to_date):
         params: dict[str, Any] = {"date": check_date, "type": 2}
         try:
-            response = _request_with_retry(url, params=params)
+            response = _request_with_retry(url, params=params, rate_limit_delay=META_RATE_LIMIT_DELAY)
             data = response.json()
         except Exception as exc:
             logger.debug("search_documents: skip date %s due to error: %s", check_date, exc)
@@ -190,7 +219,7 @@ def download_document(doc_id: str, output_type: int = 1) -> bytes:
     """
     url = f"{BASE_URL}/documents/{doc_id}"
     params: dict[str, Any] = {"type": output_type}
-    response = _request_with_retry(url, params=params)
+    response = _request_with_retry(url, params=params, rate_limit_delay=RATE_LIMIT_DELAY)
     return response.content
 
 
@@ -198,21 +227,29 @@ def get_company_meta(edinet_code: str) -> dict[str, Any]:
     """
     Get company metadata from EDINET.
 
+    Uses the module-level cache populated by resolve_ticker when available,
+    avoiding a second full date scan.
+
     Args:
         edinet_code: EDINET提出者コード
 
     Returns:
         CompanyMeta-compatible dict
     """
-    # Walk backwards from today to find a document list entry for this edinet_code
+    # Fast path: entry already cached from resolve_ticker
+    if edinet_code in _edinet_entry_cache:
+        logger.info("get_company_meta: using cached entry for edinet_code=%s", edinet_code)
+        return _build_meta_from_entry(edinet_code, _edinet_entry_cache[edinet_code])
+
+    # Slow path: scan backwards (same 400-day window as resolve_ticker)
     today = date.today()
     url = f"{BASE_URL}/documents.json"
 
-    for days_back in range(120):
+    for days_back in range(400):
         check_date = (today - timedelta(days=days_back)).isoformat()
         params: dict[str, Any] = {"date": check_date, "type": 2}
         try:
-            response = _request_with_retry(url, params=params)
+            response = _request_with_retry(url, params=params, rate_limit_delay=META_RATE_LIMIT_DELAY)
             data = response.json()
         except Exception as exc:
             logger.debug("get_company_meta: skip date %s: %s", check_date, exc)
@@ -221,23 +258,7 @@ def get_company_meta(edinet_code: str) -> dict[str, Any]:
         results: list[dict[str, Any]] = data.get("results", []) or []
         for entry in results:
             if entry.get("edinetCode") == edinet_code:
-                raw_code = str(entry.get("secCode", "")).strip()
-                ticker = raw_code.rstrip("0") if raw_code else ""
-                meta: dict[str, Any] = {
-                    "edinet_code": edinet_code,
-                    "ticker": ticker,
-                    "company_name": entry.get("filerName", ""),
-                    "company_name_en": None,
-                    "sector_code_33": "",
-                    "sector_name": entry.get("industryCode", ""),
-                    "listing_market": "プライム",  # default; not directly available from this endpoint
-                    "founded_date": None,
-                    "employee_count": None,
-                    "fiscal_year_end": "",
-                    "website_url": None,
-                    "ir_url": None,
-                    "description": None,
-                }
-                return meta
+                _edinet_entry_cache[edinet_code] = entry
+                return _build_meta_from_entry(edinet_code, entry)
 
     raise ValueError(f"Company meta not found for edinet_code: {edinet_code!r}")
