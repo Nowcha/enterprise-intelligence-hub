@@ -9,7 +9,10 @@
       "Bash(echo \"TSC_EXIT: $?\")",
       "Bash(echo \"BUILD_EXIT: $?\")",
       "Bash(echo \"EXIT: $?\")",
-      "Bash(echo \"EXIT_CODE=$?\")"
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(gh run:*)",
+      "Bash(python:*)",
+      "Bash(gh workflow:*)"
     ]
   }
 }
