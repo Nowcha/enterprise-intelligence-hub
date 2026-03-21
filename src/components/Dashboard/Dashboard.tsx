@@ -16,6 +16,7 @@ import { useFinancials } from '@/hooks/useFinancials'
 import { useAnalysis } from '@/hooks/useAnalysis'
 import { useNews } from '@/hooks/useNews'
 import { useGovernance } from '@/hooks/useGovernance'
+import { useCompetitors } from '@/hooks/useCompetitors'
 import { formatMillionYen, formatPercent, formatPeriod } from '@/utils/formatters'
 import type { GovernanceRating } from '@/types'
 
@@ -73,6 +74,7 @@ const Dashboard: React.FC = () => {
   const { data: analysisData, loading: analysisLoading } = useAnalysis(safeTicker)
   const { data: news, loading: newsLoading } = useNews(safeTicker, { limitCount: 5 })
   const { data: governance, loading: governanceLoading } = useGovernance(safeTicker)
+  const { data: competitors } = useCompetitors(safeTicker)
 
   // 財務チャート用データ（最新3期分、古い順に並び替え）
   const chartPeriods = [...financials].reverse().slice(-3)
@@ -264,15 +266,37 @@ const Dashboard: React.FC = () => {
       {/* 下段: 競合ポジション + ニュース */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
-        {/* 競合ポジション（散布図省略、シンプル版）*/}
+        {/* 競合ポジション */}
         <button
           onClick={() => navigate(`/company/${safeTicker}/competitors`)}
           className="bg-white rounded-xl shadow p-5 text-left hover:shadow-lg transition-shadow w-full"
         >
           <h3 className="text-sm font-semibold text-gray-700 mb-3">競合ポジション</h3>
-          <div className="flex items-center justify-center h-32 text-gray-400 text-sm">
-            競合データを収集してください
-          </div>
+          {competitors ? (
+            <dl className="space-y-1.5 text-sm">
+              <div className="flex justify-between">
+                <dt className="text-gray-500">推定競合</dt>
+                <dd className="font-mono font-medium text-gray-800">
+                  {competitors.estimated_competitors.length}社
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-gray-500">手動追加</dt>
+                <dd className="font-mono font-medium text-gray-800">
+                  {competitors.manual_competitors.length}社
+                </dd>
+              </div>
+              {competitors.estimated_competitors.slice(0, 2).map((c) => (
+                <div key={c.ticker} className="text-xs text-gray-500 truncate">
+                  {c.company_name}（{c.ticker}）
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <div className="flex items-center justify-center h-32 text-gray-400 text-sm">
+              競合データを収集してください
+            </div>
+          )}
           <p className="text-xs text-blue-600 mt-2">競合比較を見る →</p>
         </button>
 

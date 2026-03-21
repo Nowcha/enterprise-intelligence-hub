@@ -267,7 +267,11 @@ def extract_executive_compensation(full_text: str) -> dict[str, Any]:
     )
     total_match = total_pattern.search(section_text)
     if total_match:
-        raw = total_match.group(1).translate(str.maketrans("０-９，", "0-9,")).replace(",", "")
+        # Translate all fullwidth digits and fullwidth comma to ASCII equivalents.
+        # NOTE: str.maketrans with two strings does NOT support ranges like "０-９";
+        # each character is mapped positionally, so all digits must be listed explicitly.
+        _fw_table = str.maketrans("０１２３４５６７８９，", "0123456789,")
+        raw = total_match.group(1).translate(_fw_table).replace(",", "")
         try:
             result["total_amount"] = int(raw)
         except ValueError:

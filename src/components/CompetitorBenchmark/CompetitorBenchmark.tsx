@@ -172,7 +172,7 @@ const CompetitorBenchmark: React.FC<CompetitorBenchmarkProps> = ({ ticker }) => 
     )
   }
 
-  if (!data || allEntries.length === 0) {
+  if (!data) {
     return (
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
         <p className="text-gray-500 text-lg">競合データがありません</p>

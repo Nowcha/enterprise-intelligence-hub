@@ -1,21 +1,4 @@
 {
-  "indexes": [
-    {
-      "collectionGroup": "financials",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "period_type", "order": "ASCENDING" },
-        { "fieldPath": "period", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "news",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "source", "order": "ASCENDING" },
-        { "fieldPath": "published_at", "order": "DESCENDING" }
-      ]
-    }
-  ],
+  "indexes": [],
   "fieldOverrides": []
 }

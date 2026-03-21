@@ -41,8 +41,9 @@ run_analysis() {
         "$(cat "$prompt_file")" \
         "$(cat "$data_file")")
 
-    # Run Claude CLI in non-interactive (print) mode
-    if echo "$combined_input" | claude --print > "$output_file" 2>/dev/null; then
+    # Run Claude CLI in non-interactive (print) mode.
+    # stderr is kept visible (not /dev/null) so auth errors are surfaced in CI logs.
+    if echo "$combined_input" | claude --print > "$output_file" 2>&1; then
         echo "Analysis ${analysis_type} completed"
     else
         echo "Warning: Claude CLI failed for ${analysis_type}" >&2

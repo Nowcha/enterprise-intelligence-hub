@@ -42,7 +42,7 @@ export interface FinancialPeriod {
   eps: number | null
   dividend_per_share: number | null
   segments: Segment[]
-  data_source: 'xbrl' | 'pdf_extraction'
+  data_source: 'xbrl' | 'pdf_extraction' | 'yfinance'
   collected_at: Timestamp
   schema_version: string
 }
@@ -124,7 +124,8 @@ export interface NewsArticle {
   title: string
   url: string
   source: string
-  published_at: Timestamp
+  // Google News RSS stores this as an ISO string; Firestore-native sources use Timestamp.
+  published_at: Timestamp | string
   summary: string | null
   collected_at: Timestamp
   schema_version: string
