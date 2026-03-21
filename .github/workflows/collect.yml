@@ -49,3 +49,13 @@ jobs:
             --ticker "${{ inputs.ticker }}" \
             --mode "${{ inputs.mode }}" \
             --include-competitors "${{ inputs.include_competitors }}"
+
+      - name: Save ticker for downstream workflows
+        run: echo "${{ inputs.ticker }}" > /tmp/ticker.txt
+
+      - name: Upload ticker artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-ticker
+          path: /tmp/ticker.txt
+          retention-days: 1

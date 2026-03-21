@@ -35,12 +35,17 @@ jobs:
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Get ticker from previous workflow
+      - name: Download ticker artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: collect-ticker
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Get ticker from artifact
         id: get-ticker
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TICKER=$(gh run view ${{ github.event.workflow_run.id }} --json inputs --jq '.inputs.ticker' 2>/dev/null || echo "")
+          TICKER=$(cat ticker.txt 2>/dev/null | tr -d '[:space:]' || echo "")
           echo "ticker=$TICKER" >> $GITHUB_OUTPUT
 
       - name: Run analysis
