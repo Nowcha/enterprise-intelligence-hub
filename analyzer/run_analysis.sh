@@ -14,6 +14,8 @@ if [ -z "$TICKER" ]; then
     exit 1
 fi
 
+# Use python3 if available, otherwise fall back to python
+PYTHON="${PYTHON:-$(command -v python3 2>/dev/null || command -v python)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
@@ -22,7 +24,7 @@ echo "Starting analysis for ticker: $TICKER"
 
 # Step 1: Read data from Firestore and save to temp files
 echo "Reading data from Firestore..."
-python3 "$SCRIPT_DIR/read_data.py" "$TICKER" "$TEMP_DIR"
+"$PYTHON" "$SCRIPT_DIR/read_data.py" "$TICKER" "$TEMP_DIR"
 
 # Step 2: Run each analysis using Claude CLI
 run_analysis() {
@@ -58,8 +60,8 @@ run_analysis() {
     fi
 
     # Validate JSON output; extract from markdown block if necessary
-    if ! python3 -c "import json,sys; json.load(open('$output_file'))" 2>/dev/null; then
-        python3 - "$output_file" <<'PYEOF'
+    if ! "$PYTHON" -c "import json,sys; json.load(open('$output_file'))" 2>/dev/null; then
+        "$PYTHON" - "$output_file" <<'PYEOF'
 import json, sys, re
 
 path = sys.argv[1]
@@ -96,6 +98,6 @@ run_analysis "competitor"
 
 # Step 3: Write results to Firestore
 echo "Writing analysis results to Firestore..."
-python3 "$SCRIPT_DIR/write_analysis.py" "$TICKER" "$TEMP_DIR"
+"$PYTHON" "$SCRIPT_DIR/write_analysis.py" "$TICKER" "$TEMP_DIR"
 
 echo "Analysis completed for ticker: $TICKER"
