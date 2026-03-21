@@ -17,6 +17,7 @@ import { useAnalysis } from '@/hooks/useAnalysis'
 import { useNews } from '@/hooks/useNews'
 import { useGovernance } from '@/hooks/useGovernance'
 import { useCompetitors } from '@/hooks/useCompetitors'
+import { useStock } from '@/hooks/useStock'
 import { formatMillionYen, formatPercent, formatPeriod } from '@/utils/formatters'
 import type { GovernanceRating } from '@/types'
 
@@ -75,6 +76,7 @@ const Dashboard: React.FC = () => {
   const { data: news, loading: newsLoading } = useNews(safeTicker, { limitCount: 5 })
   const { data: governance, loading: governanceLoading } = useGovernance(safeTicker)
   const { data: competitors } = useCompetitors(safeTicker)
+  const { data: stock } = useStock(safeTicker)
 
   // 財務チャート用データ（最新3期分、古い順に並び替え）
   const chartPeriods = [...financials].reverse().slice(-3)
@@ -183,7 +185,19 @@ const Dashboard: React.FC = () => {
               </div>
               <div className="flex justify-between">
                 <dt className="text-gray-500">時価総額</dt>
-                <dd className="font-mono text-gray-500">-</dd>
+                <dd className="font-mono font-medium text-gray-800">
+                  {stock?.derived?.market_cap != null
+                    ? formatMillionYen(stock.derived.market_cap)
+                    : '-'}
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-gray-500">PER / PBR</dt>
+                <dd className="font-mono text-gray-700">
+                  {stock?.derived?.per != null ? `${stock.derived.per.toFixed(1)}倍` : '-'}
+                  {' / '}
+                  {stock?.derived?.pbr != null ? `${stock.derived.pbr.toFixed(2)}倍` : '-'}
+                </dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-gray-500">収集日</dt>

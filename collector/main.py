@@ -266,19 +266,79 @@ def _collect_edinet_features(
         logger.warning("Failed to collect governance for ticker=%s: %s", ticker, exc)
 
 
+def _build_benchmark_entry(
+    ticker: str,
+    collected: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    Build a BenchmarkEntry dict from a collect_company() result.
+
+    Extracts revenue, operating_margin, roe from the latest financial period
+    and per, pbr, market_cap from the stock derived metrics.
+
+    Args:
+        ticker: Four-digit TSE ticker code.
+        collected: Return value of collect_company().
+
+    Returns:
+        BenchmarkEntry-compatible dict, or None if no meaningful data exists.
+    """
+    meta: dict[str, Any] = collected.get("meta", {})
+    company_name: str = meta.get("company_name", "") or ticker
+
+    # financials is stored as {period_str: period_data_dict}
+    financials_dict: dict[str, Any] = collected.get("financials", {})
+    fin: dict[str, Any] = {}
+    if financials_dict:
+        # "YYYY-MM" strings sort correctly as lexicographic ISO dates
+        latest_key = max(financials_dict.keys())
+        fin = financials_dict[latest_key]
+
+    revenue: float = float(fin.get("revenue", 0) or 0)
+    op_income: float = float(fin.get("operating_income", 0) or 0)
+    operating_margin: float = round(op_income / revenue * 100, 2) if revenue > 0 else 0.0
+    roe: float | None = fin.get("roe")
+
+    derived: dict[str, Any] = collected.get("stock", {}).get("derived", {})
+
+    # Exclude entries that have no data at all
+    if not company_name and revenue == 0 and not derived:
+        return None
+
+    return {
+        "ticker": ticker,
+        "company_name": company_name,
+        "revenue": revenue,
+        "operating_margin": operating_margin,
+        "roe": roe,
+        "per": derived.get("per"),
+        "pbr": derived.get("pbr"),
+        "market_cap": derived.get("market_cap"),
+    }
+
+
 def collect_competitor_data(
     competitor_tickers: list[str],
     mode: str,
     fs_client: FirestoreClient,
-) -> None:
-    """Collect basic data for each estimated competitor."""
+) -> list[tuple[str, dict[str, Any]]]:
+    """
+    Collect basic data for each estimated competitor.
+
+    Returns:
+        List of (resolved_ticker, collected_data) tuples for BenchmarkEntry assembly.
+        Failed tickers are silently skipped (logged as warnings).
+    """
+    results: list[tuple[str, dict[str, Any]]] = []
     for comp_ticker in competitor_tickers:
         try:
             logger.info("Collecting competitor data for ticker=%s", comp_ticker)
             _, resolved_ticker, comp_name = resolve_ticker_yfinance(comp_ticker)
-            collect_company(resolved_ticker, "", comp_name, mode, fs_client)
+            comp_collected = collect_company(resolved_ticker, "", comp_name, mode, fs_client)
+            results.append((resolved_ticker, comp_collected))
         except Exception as exc:
             logger.warning("Failed to collect data for competitor ticker=%s: %s", comp_ticker, exc)
+    return results
 
 
 def main() -> None:
@@ -357,16 +417,32 @@ def main() -> None:
             )
 
             competitor_tickers = [c["ticker"] for c in competitors]
+            logger.info("Estimated %d competitors for ticker=%s", len(competitors), ticker)
+
+            # Collect competitor company data; capture results for benchmark assembly
+            competitor_results = collect_competitor_data(competitor_tickers, args.mode, fs_client)
+
+            # Build BenchmarkEntry list: target company first, then each competitor
+            benchmark_data: list[dict[str, Any]] = []
+            target_entry = _build_benchmark_entry(ticker, collected)
+            if target_entry:
+                benchmark_data.append(target_entry)
+            for comp_ticker_r, comp_collected in competitor_results:
+                comp_entry = _build_benchmark_entry(comp_ticker_r, comp_collected)
+                if comp_entry:
+                    benchmark_data.append(comp_entry)
+
             fs_client.write_competitors(ticker, {
                 "target_ticker": ticker,
                 "estimated_competitors": competitors,
                 "manual_competitors": [],
-                "benchmark_data": [],
+                "benchmark_data": benchmark_data,
                 "estimation_method": "sector_revenue_filter",
             })
-            logger.info("Estimated %d competitors for ticker=%s", len(competitors), ticker)
-
-            collect_competitor_data(competitor_tickers, args.mode, fs_client)
+            logger.info(
+                "Wrote competitor data: %d estimated, %d benchmark entries for ticker=%s",
+                len(competitors), len(benchmark_data), ticker,
+            )
 
         except Exception as exc:
             logger.warning("Competitor estimation/collection failed: %s", exc)

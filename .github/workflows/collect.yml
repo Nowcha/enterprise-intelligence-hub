@@ -43,6 +43,7 @@ jobs:
       - name: Run data collector
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
           python collector/main.py \
             --ticker "${{ inputs.ticker }}" \
