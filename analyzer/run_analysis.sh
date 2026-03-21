@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# AI Analysis Script using Claude Code CLI
-# Runs 4 sub-agents to analyze company data from Firestore
+# AI Analysis Script using Anthropic Python SDK
+# Runs 4 analyses to analyze company data from Firestore
 # Usage: ./run_analysis.sh <ticker>
 
 set -euo pipefail
@@ -21,7 +21,7 @@ echo "Starting analysis for ticker: $TICKER"
 echo "Reading data from Firestore..."
 python3 "$SCRIPT_DIR/read_data.py" "$TICKER" "$TEMP_DIR"
 
-# Step 2: Run each analysis using Claude CLI
+# Step 2: Run each analysis using Anthropic Python SDK
 run_analysis() {
     local analysis_type="$1"
     local prompt_file="$SCRIPT_DIR/prompts/${analysis_type}.md"
@@ -35,18 +35,11 @@ run_analysis() {
 
     echo "Running ${analysis_type} analysis..."
 
-    # Combine prompt and data into a single stdin payload
-    local combined_input
-    combined_input=$(printf '%s\n\n## 入力データ\n```json\n%s\n```' \
-        "$(cat "$prompt_file")" \
-        "$(cat "$data_file")")
-
-    # Run Claude CLI in non-interactive (print) mode.
-    # stderr is kept visible (not /dev/null) so auth errors are surfaced in CI logs.
-    if echo "$combined_input" | claude --print > "$output_file" 2>&1; then
+    # Call Claude API via Python SDK wrapper
+    if python3 "$SCRIPT_DIR/call_claude.py" "$prompt_file" "$data_file" "$output_file" 2>&1; then
         echo "Analysis ${analysis_type} completed"
     else
-        echo "Warning: Claude CLI failed for ${analysis_type}" >&2
+        echo "Warning: Claude API call failed for ${analysis_type}" >&2
         echo '{"error": "analysis_failed"}' > "$output_file"
         return 0
     fi

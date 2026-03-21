@@ -27,14 +27,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r analyzer/requirements.txt
 
-      - name: Set up Node.js (for Claude CLI)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Download ticker artifact
         uses: actions/download-artifact@v4
         with:
