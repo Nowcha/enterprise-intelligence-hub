@@ -1,16 +1,25 @@
 name: Analyze Company Data
 
+# NOTE: This workflow requires Anthropic API credits (ANTHROPIC_API_KEY with a paid balance).
+# For local analysis using Claude Pro subscription, run:
+#   bash analyzer/run_analysis.sh <ticker>
+# from a terminal where `claude` CLI is authenticated (claude --print).
+#
+# This workflow is kept for reference but is not automatically triggered.
+# To re-enable auto-trigger, restore the workflow_run section below.
+
 on:
-  workflow_run:
-    workflows: ["Collect Company Data"]
-    types:
-      - completed
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: '証券コード（4桁）'
+        required: true
+        type: string
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -27,27 +36,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r analyzer/requirements.txt
 
-      - name: Download ticker artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: collect-ticker
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
-
-      - name: Get ticker from artifact
-        id: get-ticker
-        run: |
-          TICKER=$(cat ticker.txt 2>/dev/null | tr -d '[:space:]' || echo "")
-          echo "ticker=$TICKER" >> $GITHUB_OUTPUT
-
       - name: Run analysis
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          TICKER="${{ steps.get-ticker.outputs.ticker }}"
+          TICKER="${{ inputs.ticker }}"
           if [ -z "$TICKER" ]; then
-            echo "No ticker found, skipping analysis"
-            exit 0
+            echo "No ticker provided"
+            exit 1
           fi
           bash analyzer/run_analysis.sh "$TICKER"
